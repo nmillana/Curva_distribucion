@@ -1,1 +1,923 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tablero Desempeño – Filtros anidados + Gráfico (Offline)</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:0;padding:16px;background:#f5f5f5}
+  h1,h2{margin:0 0 12px 0}
+  .header{margin-bottom:16px}
+  .note{font-size:12px;color:#555;margin:6px 0 12px 0;line-height:1.35}
+  .summary-table{border-collapse:collapse;background:#fff;margin-top:8px;width:100%}
+  .summary-table th,.summary-table td{border:1px solid #ddd;padding:6px 10px;font-size:12px}
+  .summary-table th{background:#f2f2f2;text-align:left}
+  .kanban-container{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;margin-top:16px}
+  .column{background:#fff;border-radius:8px;padding:8px;min-width:220px;max-width:260px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+  .column-header{font-weight:700;margin-bottom:6px;font-size:13px}
+  .column-subtitle{font-size:11px;color:#555;margin-bottom:8px}
+  .card{background:#fafafa;border-radius:6px;padding:6px 8px;margin-bottom:6px;border:1px solid #e0e0e0;font-size:11px}
+  .card-title{font-weight:700;margin-bottom:2px}
+  .card-meta{color:#555}
+  .badge{display:inline-block;padding:2px 6px;border-radius:10px;font-size:10px;margin-left:4px;background:#eee}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:10px}
+  .control{display:flex;flex-direction:column;gap:4px}
+  .control label{font-size:12px;color:#333}
+  select,input{padding:6px 8px;font-size:12px;border:1px solid #ccc;border-radius:6px;min-width:220px;background:#fff}
+  button{padding:6px 10px;font-size:12px;cursor:pointer;margin-right:10px}
+  #status{font-size:12px;color:#b00020;margin-top:8px}
+  #ok{font-size:12px;color:#0a6d0a;margin-top:8px}
+  small{color:#666}
+  .pill{display:inline-block;background:#e8f0fe;border:1px solid #c7d2fe;border-radius:999px;padding:2px 8px;font-size:11px;margin-right:6px;margin-top:6px}
+  hr{border:none;border-top:1px solid #ddd;margin:14px 0}
+  .chart-wrap{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:10px;margin-top:10px}
+  #distChart{width:100%;height:420px;display:block}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Tablero de Desempeño</h1>
+
+  <div class="note">
+    Funciona <b>sin internet</b>. Carga por <b>CSV</b> exportado desde Excel (Archivo → Guardar como → CSV).
+  </div>
+
+  <input type="file" id="fileInput" accept=".csv" />
+  <button id="downloadXLS" disabled>Descargar Excel (.xls) con tablero</button>
+  <button id="downloadCSV" disabled>Descargar procesado (.csv)</button>
+  <div id="status"></div>
+  <div id="ok"></div>
+
+  <div class="controls">
+    <div class="control">
+      <label for="fGerencia">Gerencia</label>
+      <select id="fGerencia" disabled></select>
+    </div>
+    <div class="control">
+      <label for="fArea">Área</label>
+      <select id="fArea" disabled></select>
+    </div>
+    <div class="control">
+      <label for="fDepto">Departamento</label>
+      <select id="fDepto" disabled></select>
+    </div>
+    <div class="control">
+      <label for="fCargo">Cargo</label>
+      <select id="fCargo" disabled></select>
+    </div>
+    <div class="control" style="min-width:320px">
+      <label for="search">Búsqueda libre</label>
+      <input type="text" id="search" placeholder="Nombre / evaluador / texto..." disabled />
+    </div>
+    <div class="control">
+      <label>&nbsp;</label>
+      <button id="clearFilters" disabled>Limpiar filtros</button>
+    </div>
+  </div>
+
+  <div id="activeFilters"></div>
+
+  <hr/>
+
+  <h2>Distribución Real vs Curva Directriz</h2>
+
+  <div class="chart-wrap">
+    <canvas id="distChart" width="1100" height="420"></canvas>
+    <div class="note" style="margin:6px 0 0 0">
+      Línea azul: <b>% Real</b> · Línea naranja: <b>% Curva</b> (5%-20%-50%-20%-5%).
+    </div>
+  </div>
+
+  <table class="summary-table" id="summaryTable">
+    <tr>
+      <th>Categoría</th>
+      <th style="text-align:right;">Real (n)</th>
+      <th style="text-align:right;">Curva (n esperado)</th>
+      <th style="text-align:right;">Brecha</th>
+      <th style="text-align:right;">% Real</th>
+      <th style="text-align:right;">% Curva</th>
+    </tr>
+  </table>
+
+  <div class="note">
+    Columnas mínimas: <small>Nombre Completo, Cargo, Evaluador, Calificación, Descripción</small><br/>
+    Para filtros desplegables agrega: <small>Gerencia, Área/Area, Departamento</small>
+  </div>
+</div>
+
+<div class="kanban-container" id="kanban"></div>
+
+<script>
+const cats = ["Insatisfactorio","Necesita Mejorar","Cumple las Expectativas","Excede las Expectativas","Desempeño Destacado"];
+const allCats = [...cats,"Sin calificación"];
+
+let baseLimpia = [];
+let filteredBase = [];
+let kanbanData = {};
+let distRows = [];
+let headerMap = {};
+
+const pctCurve = {"Insatisfactorio":0.05,"Necesita Mejorar":0.20,"Cumple las Expectativas":0.50,"Excede las Expectativas":0.20,"Desempeño Destacado":0.05};
+
+const el = (id) => document.getElementById(id);
+
+el('fileInput').addEventListener('change', handleFile, false);
+el('downloadXLS').addEventListener('click', downloadXLS, false);
+el('downloadCSV').addEventListener('click', downloadCSV, false);
+
+el('search').addEventListener('input', applyFilters, false);
+
+// Cascada: al cambiar arriba, resetea abajo y repuebla
+el('fGerencia').addEventListener('change', () => { resetBelow("Gerencia"); repopulateCascades(); applyFilters(); }, false);
+el('fArea').addEventListener('change', () => { resetBelow("Área"); repopulateCascades(); applyFilters(); }, false);
+el('fDepto').addEventListener('change', () => { resetBelow("Departamento"); repopulateCascades(); applyFilters(); }, false);
+el('fCargo').addEventListener('change', applyFilters, false);
+
+el('clearFilters').addEventListener('click', () => {
+  el('fGerencia').value = "__ALL__";
+  el('fArea').value = "__ALL__";
+  el('fDepto').value = "__ALL__";
+  el('fCargo').value = "__ALL__";
+  el('search').value = "";
+  repopulateCascades(true); // full reset
+  applyFilters();
+}, false);
+
+function setStatus(msg){ el('status').textContent = msg || ""; }
+function setOk(msg){ el('ok').textContent = msg || ""; }
+
+function handleFile(e){
+  setStatus(""); setOk("");
+  const file = e.target.files[0];
+  if(!file) return;
+
+  const name = (file.name || "").toLowerCase();
+  if(name.endsWith(".xlsx") || name.endsWith(".xls")){
+    setStatus("Esta versión offline no lee .xlsx directo. Exporta como CSV y carga el .csv.");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function(evt){
+    try{
+      const text = evt.target.result;
+      const rows = parseCSV(text);
+      if(!rows.length){ setStatus("El CSV está vacío o no se pudo leer."); return; }
+      process(rows);
+    }catch(err){
+      console.error(err);
+      setStatus("Error leyendo el CSV.");
+    }
+  }
+  reader.readAsText(file, "UTF-8");
+}
+
+function parseCSV(text){
+  const lines = text.split(/\r?\n/).filter(l => l.trim() !== "");
+  if(!lines.length) return [];
+  const headerLine = lines[0];
+  const sep = (headerLine.split(";").length - 1) > (headerLine.split(",").length - 1) ? ";" : ",";
+  const headers = splitCSVLine(headerLine, sep).map(h => h.trim());
+
+  const rows = [];
+  for(let i=1;i<lines.length;i++){
+    const parts = splitCSVLine(lines[i], sep);
+    if(parts.length===1 && parts[0].trim()==="") continue;
+    const row = {};
+    for(let j=0;j<headers.length;j++){
+      row[headers[j]] = (parts[j] !== undefined ? parts[j].trim() : "");
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function splitCSVLine(line, sep){
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for(let i=0;i<line.length;i++){
+    const ch = line[i];
+    if(ch === '"'){
+      if(inQuotes && line[i+1] === '"'){ cur += '"'; i++; }
+      else { inQuotes = !inQuotes; }
+    } else if(ch === sep && !inQuotes){
+      out.push(cur); cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function normCat(desc){
+  const d = String(desc||"").trim().toLowerCase();
+  const m = {
+    "cumple las expectativas":"Cumple las Expectativas",
+    "excede las expectativas":"Excede las Expectativas",
+    "necesita mejorar":"Necesita Mejorar",
+    "desempeño destacado":"Desempeño Destacado",
+    "desempeno destacado":"Desempeño Destacado",
+    "sin calificación":"Sin calificación",
+    "sin calificacion":"Sin calificación"
+  };
+  return m[d] || String(desc||"").trim();
+}
+
+function process(rows){
+  headerMap = {};
+  Object.keys(rows[0]).forEach(k => headerMap[k.trim()] = k);
+
+  const req = ["Nombre Completo","Cargo","Evaluador","Calificación","Descripción"];
+  const missing = req.filter(r => !headerMap[r]);
+  if(missing.length){
+    setStatus("Faltan columnas obligatorias: " + missing.join(", "));
+    return;
+  }
+
+  function get(row, col){
+    const key = headerMap[col];
+    return key ? (row[key] ?? "") : "";
+  }
+
+  const hasGer = !!headerMap["Gerencia"];
+  const hasDepto = !!headerMap["Departamento"];
+  const hasArea = !!(headerMap["Área"] || headerMap["Area"]);
+
+  baseLimpia = rows.map(r => {
+    const nombre = get(r,"Nombre Completo");
+    const cargo = get(r,"Cargo");
+    const evaluador = get(r,"Evaluador");
+
+    const gerencia = hasGer ? get(r,"Gerencia") : "";
+    const area = hasArea ? (headerMap["Área"] ? get(r,"Área") : get(r,"Area")) : "";
+    const depto = hasDepto ? get(r,"Departamento") : "";
+
+    const desc = get(r,"Descripción");
+    const calRaw = String(get(r,"Calificación")||"").replace(",",".").trim();
+    const calNum = parseFloat(calRaw);
+    const cat = normCat(desc);
+
+    return {
+      "Gerencia": String(gerencia||"").trim(),
+      "Área": String(area||"").trim(),
+      "Departamento": String(depto||"").trim(),
+      "Nombre Completo": String(nombre||"").trim(),
+      "Cargo": String(cargo||"").trim(),
+      "Evaluador": String(evaluador||"").trim(),
+      "Calificación": get(r,"Calificación"),
+      "Calif_num": isNaN(calNum) ? "" : calNum,
+      "Descripción": String(desc||"").trim(),
+      "Categoria": cat
+    };
+  });
+
+  // habilitar controles
+  el('search').disabled = false;
+  el('downloadXLS').disabled = false;
+  el('downloadCSV').disabled = false;
+  el('clearFilters').disabled = false;
+  el('fGerencia').disabled = false;
+  el('fArea').disabled = false;
+  el('fDepto').disabled = false;
+  el('fCargo').disabled = false;
+
+  // defaults
+  el('fGerencia').value = "__ALL__";
+  el('fArea').value = "__ALL__";
+  el('fDepto').value = "__ALL__";
+  el('fCargo').value = "__ALL__";
+  el('search').value = "";
+
+  // poblar cascadas (anidadas)
+  repopulateCascades(true);
+  applyFilters();
+
+  setOk("Procesado OK. Dotación total: " + baseLimpia.length + " (incluye sin calificación).");
+}
+
+function uniqueVals(arr){
+  const s = new Set(arr.map(v => String(v||"").trim()).filter(v => v));
+  return Array.from(s).sort((a,b) => a.localeCompare(b, 'es', {sensitivity:'base'}));
+}
+
+function buildSelect(id, values, keepValue){
+  const sel = el(id);
+  const prev = keepValue ? sel.value : "__ALL__";
+  sel.innerHTML = "";
+
+  const optAll = document.createElement('option');
+  optAll.value = "__ALL__";
+  optAll.textContent = "(Todas)";
+  sel.appendChild(optAll);
+
+  values.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = v;
+    sel.appendChild(o);
+  });
+
+  // restaurar si aún existe
+  if(keepValue && prev && (prev==="__ALL__" || values.includes(prev))){
+    sel.value = prev;
+  } else {
+    sel.value = "__ALL__";
+  }
+}
+
+function resetBelow(level){
+  // Si cambia Gerencia, resetea Área, Depto y Cargo
+  // Si cambia Área, resetea Depto y Cargo
+  // Si cambia Depto, resetea Cargo
+  if(level === "Gerencia"){
+    el('fArea').value = "__ALL__";
+    el('fDepto').value = "__ALL__";
+    el('fCargo').value = "__ALL__";
+  } else if(level === "Área"){
+    el('fDepto').value = "__ALL__";
+    el('fCargo').value = "__ALL__";
+  } else if(level === "Departamento"){
+    el('fCargo').value = "__ALL__";
+  }
+}
+
+// Repuebla opciones de combos según selección actual (cascada).
+// Si fullReset=true, ignora selecciones previas y arma desde base completa.
+function repopulateCascades(fullReset=false){
+  const g = fullReset ? "__ALL__" : el('fGerencia').value;
+  const a = fullReset ? "__ALL__" : el('fArea').value;
+  const d = fullReset ? "__ALL__" : el('fDepto').value;
+
+  // 1) Gerencia siempre desde base completa
+  const gerVals = uniqueVals(baseLimpia.map(r => r.Gerencia));
+  buildSelect('fGerencia', gerVals, !fullReset);
+
+  // 2) Áreas dependen de Gerencia
+  const baseAfterG = baseLimpia.filter(r => (g==="__ALL__" || r.Gerencia===g));
+  const areaVals = uniqueVals(baseAfterG.map(r => r["Área"]));
+  buildSelect('fArea', areaVals, !fullReset);
+
+  // 3) Departamentos dependen de Gerencia + Área
+  const baseAfterGA = baseAfterG.filter(r => (a==="__ALL__" || r["Área"]===a));
+  const deptVals = uniqueVals(baseAfterGA.map(r => r.Departamento));
+  buildSelect('fDepto', deptVals, !fullReset);
+
+  // 4) Cargo depende de Gerencia + Área + Departamento
+  const baseAfterGAD = baseAfterGA.filter(r => (d==="__ALL__" || r.Departamento===d));
+  const cargoVals = uniqueVals(baseAfterGAD.map(r => r.Cargo));
+  buildSelect('fCargo', cargoVals, !fullReset);
+}
+
+function rowText(r){
+  return ([
+    r.Gerencia||"",
+    r["Área"]||"",
+    r.Departamento||"",
+    r["Nombre Completo"]||"",
+    r.Cargo||"",
+    r.Evaluador||"",
+    r.Categoria||"",
+    r["Descripción"]||""
+  ].join(" ")).toLowerCase();
+}
+
+function applyFilters(){
+  const g = el('fGerencia').value;
+  const a = el('fArea').value;
+  const d = el('fDepto').value;
+  const c = el('fCargo').value;
+  const term = (el('search').value || "").toLowerCase().trim();
+
+  filteredBase = baseLimpia.filter(r => {
+    if(g !== "__ALL__" && (r.Gerencia||"") !== g) return false;
+    if(a !== "__ALL__" && (r["Área"]||"") !== a) return false;
+    if(d !== "__ALL__" && (r.Departamento||"") !== d) return false;
+    if(c !== "__ALL__" && (r.Cargo||"") !== c) return false;
+    if(term && !rowText(r).includes(term)) return false;
+    return true;
+  });
+
+  rebuildFrom(filteredBase);
+  renderSummary(distRows);
+  renderKanban(kanbanData);
+  renderActiveFilters();
+  drawChart(distRows);
+
+  setOk("Mostrando: " + filteredBase.length + " de " + baseLimpia.length + " (curva recalculada sobre dotación filtrada).");
+}
+
+function renderActiveFilters(){
+  const wrap = el('activeFilters');
+  wrap.innerHTML = "";
+
+  const pills = [];
+  const g = el('fGerencia').value;
+  const a = el('fArea').value;
+  const d = el('fDepto').value;
+  const c = el('fCargo').value;
+  const term = (el('search').value || "").trim();
+
+  pills.push(["Gerencia", g === "__ALL__" ? "(Todas)" : g]);
+  pills.push(["Área", a === "__ALL__" ? "(Todas)" : a]);
+  pills.push(["Departamento", d === "__ALL__" ? "(Todas)" : d]);
+  pills.push(["Cargo", c === "__ALL__" ? "(Todas)" : c]);
+  if(term) pills.push(["Búsqueda", term]);
+
+  pills.forEach(([k,v]) => {
+    const p = document.createElement('span');
+    p.className = "pill";
+    p.textContent = k + ": " + v;
+    wrap.appendChild(p);
+  });
+}
+
+// Asignación exacta (suma exacta = total) usando "largest remainder"
+function allocateExpected(total){
+  const floors = {};
+  const fracs = [];
+  let sumFloor = 0;
+
+  cats.forEach(cat => {
+    const raw = pctCurve[cat] * total;
+    const fl = Math.floor(raw);
+    floors[cat] = fl;
+    sumFloor += fl;
+    fracs.push({cat: cat, frac: raw - fl});
+  });
+
+  let remaining = total - sumFloor;
+  fracs.sort((x,y) => y.frac - x.frac);
+
+  for(let i=0; i<fracs.length && remaining>0; i++){
+    floors[fracs[i].cat] += 1;
+    remaining -= 1;
+    if(i === fracs.length-1 && remaining>0){
+      // si aún queda por rounding raro, vuelve a empezar
+      i = -1;
+    }
+  }
+  return floors;
+}
+
+function rebuildFrom(data){
+  // kanban
+  kanbanData = {};
+  allCats.forEach(c => kanbanData[c] = []);
+  data.forEach(r => {
+    let c = r.Categoria;
+    if(!c || c==="" || c==="Sin calificación") c = "Sin calificación";
+    if(!allCats.includes(c)) c = "Sin calificación";
+    kanbanData[c].push(r);
+  });
+
+  // ordenar por calificación desc
+  allCats.forEach(c => {
+    kanbanData[c].sort((a,b) => {
+      const av = (a.Calif_num==="" ? -9999 : Number(a.Calif_num));
+      const bv = (b.Calif_num==="" ? -9999 : Number(b.Calif_num));
+      return bv - av;
+    });
+  });
+
+  // distribución real
+  const real = {};
+  allCats.forEach(c => real[c] = 0);
+  data.forEach(r => {
+    let c = r.Categoria;
+    if(!c || c==="" || c==="Sin calificación") c="Sin calificación";
+    if(!allCats.includes(c)) c="Sin calificación";
+    real[c] = (real[c]||0) + 1;
+  });
+
+  const total = data.length;
+  const expected = allocateExpected(total); // suma exacta = total
+
+  distRows = [];
+  cats.forEach(c => {
+    const exp = expected[c] || 0;
+    distRows.push({
+      Categoria: c,
+      Real: real[c] || 0,
+      Curva: exp,
+      Brecha: (real[c]||0) - exp,
+      PctReal: total ? (real[c]||0)/total : 0,
+      PctCurva: total ? exp/total : 0
+    });
+  });
+
+  distRows.push({
+    Categoria: "Sin calificación",
+    Real: real["Sin calificación"] || 0,
+    Curva: 0,
+    Brecha: "",
+    PctReal: total ? (real["Sin calificación"]||0)/total : 0,
+    PctCurva: 0
+  });
+
+  // total
+  const totalReal = total;
+  const totalCurva = cats.reduce((s,c)=>s + (expected[c]||0), 0); // = total
+  distRows.push({
+    Categoria: "Total",
+    Real: totalReal,
+    Curva: totalCurva,
+    Brecha: "",
+    PctReal: totalReal ? 1 : 0,
+    PctCurva: totalCurva ? 1 : 0
+  });
+}
+
+function pctFmt(x){
+  const v = Number(x);
+  if(!isFinite(v)) return "—";
+  return Math.round(v*100) + "%";
+}
+
+function renderSummary(rows){
+  const t = el('summaryTable');
+  while(t.rows.length>1) t.deleteRow(1);
+
+  rows.forEach(r => {
+    const tr = t.insertRow(-1);
+    const isTotal = r.Categoria === "Total";
+    if(isTotal){
+      tr.style.fontWeight = "700";
+      tr.style.background = "#fafafa";
+    }
+
+    tr.innerHTML = `
+      <td>${escapeHtml(r.Categoria)}</td>
+      <td style="text-align:right;">${escapeHtml(r.Real)}</td>
+      <td style="text-align:right;">${escapeHtml(r.Curva)}</td>
+      <td style="text-align:right;">${r.Brecha === "" ? "—" : escapeHtml(r.Brecha)}</td>
+      <td style="text-align:right;">${pctFmt(r.PctReal)}</td>
+      <td style="text-align:right;">${(cats.includes(r.Categoria)) ? (Math.round((pctCurve[r.Categoria]||0)*100) + "%") : (r.Categoria==="Total" ? "100%" : "—")}</td>
+    `;
+  });
+}
+
+function renderKanban(data){
+  const k = el('kanban');
+  k.innerHTML = "";
+  const subtitles = {
+    "Insatisfactorio":"5% esperado según curva",
+    "Necesita Mejorar":"20% esperado según curva",
+    "Cumple las Expectativas":"50% esperado según curva",
+    "Excede las Expectativas":"20% esperado según curva",
+    "Desempeño Destacado":"5% esperado según curva",
+    "Sin calificación":"Fuera de curva, solo control"
+  };
+
+  allCats.forEach(cat => {
+    const col = document.createElement("div");
+    col.className = "column";
+    col.innerHTML = `<div class="column-header">${cat}</div><div class="column-subtitle">${subtitles[cat]||""}</div>`;
+    const rows = data[cat] || [];
+    if(!rows.length){
+      const empty = document.createElement("div");
+      empty.className = "card";
+      empty.innerHTML = `<div class="card-meta">Sin personas en este tramo.</div>`;
+      col.appendChild(empty);
+    } else {
+      rows.forEach(r => {
+        const cal = r.Calif_num === "" ? "" : Number(r.Calif_num);
+        const calStr = r.Calif_num === "" ? "Sin calificación" : cal.toFixed(1);
+        const line2 = [r.Gerencia, r["Área"], r.Departamento].filter(x => x).join(" · ");
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <div class="card-title">${escapeHtml(r["Nombre Completo"])}</div>
+          <div class="card-meta">${escapeHtml(line2)}</div>
+          <div class="card-meta">${escapeHtml(r.Cargo)}</div>
+          <div class="card-meta">Evaluador: <strong>${escapeHtml(r.Evaluador)}</strong></div>
+          <div class="card-meta">
+            Calificación: <strong>${escapeHtml(calStr)}</strong>
+            <span class="badge">${cat}</span>
+          </div>
+        `;
+        col.appendChild(card);
+      });
+    }
+    k.appendChild(col);
+  });
+}
+
+function escapeHtml(s){
+  return String(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
+}
+
+// ====== Gráfico (canvas, sin librerías) ======
+function drawChart(rows){
+  const canvas = el('distChart');
+  const ctx = canvas.getContext('2d');
+
+  // Ajuste responsivo del canvas
+  const wrap = canvas.parentElement;
+  const w = Math.max(520, Math.min(920, wrap.clientWidth - 20));
+  const h = 260;
+  canvas.width = w;
+  canvas.height = h;
+
+  ctx.clearRect(0,0,w,h);
+
+  const plot = rows.filter(r => cats.includes(r.Categoria));
+  const labels = plot.map(r => r.Categoria.toUpperCase());
+  const real = plot.map(r => Math.round((r.PctReal||0)*100));
+  const curva = plot.map(r => Math.round((pctCurve[r.Categoria]||0)*100));
+
+  // Márgenes
+  const ml = 56, mr = 70, mt = 16, mb = 68;
+  const pw = w - ml - mr;
+  const ph = h - mt - mb;
+
+  // fondo
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0,0,w,h);
+
+  // grilla Y (0-100)
+  ctx.strokeStyle = "#eee";
+  ctx.lineWidth = 1;
+  for(let y=0; y<=100; y+=20){
+    const yy = mt + ph - (y/100)*ph;
+    ctx.beginPath();
+    ctx.moveTo(ml, yy);
+    ctx.lineTo(ml+pw, yy);
+    ctx.stroke();
+
+    ctx.fillStyle = "#666";
+    ctx.font = "11px Arial";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(y+"%", ml-8, yy);
+  }
+
+  // eje X base
+  ctx.strokeStyle = "#ddd";
+  ctx.beginPath();
+  ctx.moveTo(ml, mt+ph);
+  ctx.lineTo(ml+pw, mt+ph);
+  ctx.stroke();
+
+  const n = labels.length;
+  const x = (i) => ml + (n===1 ? pw/2 : (i*(pw/(n-1))));
+  const y = (pct) => mt + ph - (pct/100)*ph;
+
+  // etiquetas eje X (evita corte en extremos)
+  ctx.fillStyle = "#444";
+  ctx.font = "10px Arial";
+  ctx.textBaseline = "top";
+  labels.forEach((lab, i) => {
+    const xxRaw = x(i);
+
+    // Alineación para que no se corte el primer/último rótulo
+    if(i === 0){ ctx.textAlign = "left"; }
+    else if(i === labels.length-1){ ctx.textAlign = "right"; }
+    else { ctx.textAlign = "center"; }
+
+    const xx = (i === 0) ? (ml + 2) : (i === labels.length-1 ? (ml + pw - 2) : xxRaw);
+
+    // división de texto simple
+    const parts = lab.split(" ");
+    const line1 = parts.slice(0,2).join(" ");
+    const line2 = parts.slice(2).join(" ");
+    ctx.fillText(line1, xx, mt+ph+10);
+    if(line2) ctx.fillText(line2, xx, mt+ph+24);
+  });
+
+  // función para trazar serie
+  function drawSeries(vals, stroke, fill){
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    vals.forEach((v,i) => {
+      const xx = x(i), yy = y(v);
+      if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);
+    });
+    ctx.stroke();
+
+    // puntos + etiquetas
+    vals.forEach((v,i) => {
+      const xx = x(i), yy = y(v);
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(xx,yy,5,0,Math.PI*2);
+      ctx.fill();
+
+      ctx.fillStyle = "#111";
+      ctx.font = "10px Arial";
+      // Evita que el texto del primer/último punto se corte
+      if(i === 0){ ctx.textAlign = "left"; }
+      else if(i === vals.length-1){ ctx.textAlign = "right"; }
+      else { ctx.textAlign = "center"; }
+      ctx.textBaseline = "bottom";
+      const xText = (i === 0) ? (xx + 2) : (i === vals.length-1 ? (xx - 2) : xx);
+      ctx.fillText(v+"%", xText, yy-8);
+    });
+  }
+
+  drawSeries(real, "#1f77b4", "#1f77b4");   // azul
+  drawSeries(curva, "#ff7f0e", "#ff7f0e"); // naranja
+
+  // leyenda
+  ctx.fillStyle = "#111";
+  ctx.font = "11px Arial";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText("Real", ml, 12);
+  ctx.fillStyle = "#1f77b4"; ctx.fillRect(ml+30, 7, 18, 6);
+  ctx.fillStyle = "#111"; ctx.fillText("Curva", ml+60, 12);
+  ctx.fillStyle = "#ff7f0e"; ctx.fillRect(ml+104, 7, 18, 6);
+}
+
+// ====== Export XLS con vista filtrada (Tablero + Filtros + Base) ======
+function downloadXLS(){
+  if(!filteredBase.length) return;
+  const html = buildExcelWorkbookHtml();
+  const blob = new Blob([html], {type: "application/vnd.ms-excel"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Tablero_Filtrado_Con_Curva_y_Tablero.xls";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function buildExcelWorkbookHtml(){
+  const tableroHtml = buildDashboardSheetHtml();
+  const filtrosHtml = buildFiltersSheetHtml();
+  const baseHtml = buildBaseSheetHtml();
+
+  return `
+  <html xmlns:o="urn:schemas-microsoft-com:office:office"
+        xmlns:x="urn:schemas-microsoft-com:office:excel"
+        xmlns="http://www.w3.org/TR/REC-html40">
+  <head>
+    <meta charset="UTF-8">
+    <!--[if gte mso 9]><xml>
+      <x:ExcelWorkbook>
+        <x:ExcelWorksheets>
+          <x:ExcelWorksheet><x:Name>Tablero</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Filtros</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Base</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+        </x:ExcelWorksheets>
+      </x:ExcelWorkbook>
+    </xml><![endif]-->
+    <style>
+      table{border-collapse:collapse;font-family:Arial,sans-serif;font-size:11px}
+      th,td{border:1px solid #999;padding:4px;vertical-align:top}
+      th{background:#f2f2f2}
+      .title{font-size:14px;font-weight:bold;border:none;padding:0 0 8px 0}
+      .cardcell{border:1px solid #ccc;background:#fafafa}
+    </style>
+  </head>
+  <body>
+    <div id="Tablero">${tableroHtml}</div>
+    <div id="Filtros">${filtrosHtml}</div>
+    <div id="Base">${baseHtml}</div>
+  </body>
+  </html>`;
+}
+
+function buildFiltersSheetHtml(){
+  const g = el('fGerencia').value;
+  const a = el('fArea').value;
+  const d = el('fDepto').value;
+  const c = el('fCargo').value;
+  const term = (el('search').value || "").trim();
+
+  const rows = [
+    ["Filtro", "Valor"],
+    ["Gerencia", g==="__ALL__" ? "(Todas)" : g],
+    ["Área", a==="__ALL__" ? "(Todas)" : a],
+    ["Departamento", d==="__ALL__" ? "(Todas)" : d],
+    ["Cargo", c==="__ALL__" ? "(Todas)" : c],
+    ["Búsqueda libre", term ? term : "(vacío)"],
+    ["Dotación filtrada", String(filteredBase.length)]
+  ];
+
+  let out = `<div class="title">Filtros aplicados</div><table>`;
+  rows.forEach((r, idx) => {
+    out += "<tr>";
+    out += idx===0 ? `<th>${escapeHtml(r[0])}</th><th>${escapeHtml(r[1])}</th>` : `<td>${escapeHtml(r[0])}</td><td>${escapeHtml(r[1])}</td>`;
+    out += "</tr>";
+  });
+  out += "</table>";
+  return out;
+}
+
+function buildDashboardSheetHtml(){
+  let dist = `<div class="title">Distribución Real vs Curva Directriz (vista filtrada)</div>`;
+  dist += `<table><tr>
+    <th>Categoría</th><th>Real (n)</th><th>Curva (n esperado)</th><th>Brecha</th><th>% Real</th><th>% Curva</th>
+  </tr>`;
+  distRows.forEach(r => {
+    dist += `<tr>
+      <td>${escapeHtml(r.Categoria)}</td>
+      <td style="text-align:right">${escapeHtml(r.Real)}</td>
+      <td style="text-align:right">${escapeHtml(r.Curva)}</td>
+      <td style="text-align:right">${r.Brecha === "" ? "" : escapeHtml(r.Brecha)}</td>
+      <td style="text-align:right">${pctFmt(r.PctReal)}</td>
+      <td style="text-align:right">${(cats.includes(r.Categoria)) ? (Math.round((pctCurve[r.Categoria]||0)*100) + "%") : (r.Categoria==="Total" ? "100%" : "")}</td>
+    </tr>`;
+  });
+  dist += `</table><br/>`;
+
+  const headers = allCats;
+  const lists = headers.map(h => (kanbanData[h] || []).map(r => {
+    const calStr = r.Calif_num === "" ? "Sin calificación" : Number(r.Calif_num).toFixed(1);
+    const line2 = [r.Gerencia, r["Área"], r.Departamento].filter(x => x).join(" · ");
+    return `${r["Nombre Completo"]}\n${line2}\n${r.Cargo}\nEvaluador: ${r.Evaluador}\nCalificación: ${calStr}`;
+  }));
+  const maxLen = Math.max(...lists.map(a => a.length), 1);
+
+  let grid = `<div class="title">Tablero (Kanban)</div>`;
+  grid += `<table><tr>`;
+  headers.forEach(h => grid += `<th>${escapeHtml(h)}</th>`);
+  grid += `</tr>`;
+
+  for(let i=0;i<maxLen;i++){
+    grid += `<tr>`;
+    for(let c=0;c<headers.length;c++){
+      const val = (lists[c][i] !== undefined) ? lists[c][i] : "";
+      const valHtml = escapeHtml(val).replaceAll("\n","<br/>");
+      grid += `<td class="cardcell">${valHtml}</td>`;
+    }
+    grid += `</tr>`;
+  }
+  grid += `</table>`;
+
+
+  // Datos para gráfico (para Excel)
+  let chartData = `<br/><div class="title">Datos Gráfico (% Real vs % Curva)</div>`;
+  chartData += `<table><tr><th>Categoria</th><th>% Real</th><th>% Curva</th></tr>`;
+  distRows.forEach(r => {
+    if(cats.includes(r.Categoria)){
+      const pctR = r.PctReal !== undefined ? Math.round(r.PctReal*100) + "%" : "";
+      const pctC = Math.round((pctCurve[r.Categoria]||0)*100) + "%";
+      chartData += `<tr><td>${escapeHtml(r.Categoria)}</td><td style="text-align:right">${pctR}</td><td style="text-align:right">${pctC}</td></tr>`;
+    }
+  });
+  chartData += `</table>`;
+  return dist + grid + chartData;
+}
+
+function buildBaseSheetHtml(){
+  if(!filteredBase.length) return "<p>(sin datos)</p>";
+  const cols = Object.keys(filteredBase[0]);
+  let out = `<div class="title">Base (vista filtrada)</div><table><tr>`;
+  cols.forEach(c => out += `<th>${escapeHtml(c)}</th>`);
+  out += `</tr>`;
+  filteredBase.forEach(r => {
+    out += "<tr>";
+    cols.forEach(c => out += `<td>${escapeHtml(r[c])}</td>`);
+    out += "</tr>";
+  });
+  out += "</table>";
+  return out;
+}
+
+// ====== Export CSV vista filtrada ======
+function downloadCSV(){
+  if(!filteredBase.length) return;
+  const sections = [];
+  sections.push(toCsvSection("Base_Filtrada", filteredBase));
+
+  const kanbanFlat = [];
+  allCats.forEach(c => (kanbanData[c]||[]).forEach(r => kanbanFlat.push(Object.assign({Categoria_tablero:c}, r))));
+  sections.push(toCsvSection("Kanban_Filtrado", kanbanFlat));
+  sections.push(toCsvSection("Distribucion_Filtrada", distRows));
+
+  const blob = new Blob([sections.join("\n\n")], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Tablero_Filtrado_Procesado.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function toCsvSection(title, rows){
+  if(!rows.length) return title + "\n";
+  const cols = Object.keys(rows[0]);
+  let out = title + "\n" + cols.join(";") + "\n";
+  rows.forEach(r => {
+    const line = cols.map(c => {
+      const v = (r[c]===undefined || r[c]===null) ? "" : String(r[c]);
+      const vv = v.includes(";") || v.includes('"') || v.includes("\n") ? '"' + v.replaceAll('"','""') + '"' : v;
+      return vv;
+    }).join(";");
+    out += line + "\n";
+  });
+  return out;
+}
+
+// Redibujar gráfico en resize
+window.addEventListener('resize', () => {
+  if(distRows && distRows.length) drawChart(distRows);
+});
+</script>
+</body>
+</html>
 
